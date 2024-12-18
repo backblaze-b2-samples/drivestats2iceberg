@@ -1,0 +1,4 @@
+pyiceberg[s3fs,pyarrow,sql-sqlite]==0.8.1
+pyarrow==18.1.0
+requests==2.32.3
+python-dotenv==1.0.1
