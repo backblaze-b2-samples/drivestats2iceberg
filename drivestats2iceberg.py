@@ -450,12 +450,16 @@ def parse_arguments():
 def main():
     args = parse_arguments()
 
+    # Check that the supplied log level is valid
     log_level = getattr(logging, args.log.upper(), None)
     if not isinstance(log_level, int):
         raise ValueError('Invalid log level: %s' % args.log)
+
+    # Basic logging setup - log to stderr with the supplied log level
     logging.basicConfig()
     logger.setLevel(level=log_level)
 
+    # Optionally enable PyArrow logging
     if args.debug_pyarrow_fs:
         logger.info('Setting PyArrow log level to "Debug"')
         fs.initialize_s3(fs.S3LogLevel.Debug)
@@ -467,7 +471,7 @@ def main():
     # Never put credentials in source code!
     load_dotenv(override=True)
 
-    # The Processor constructor logs table metadata
+    # The Processor constructor logs table metadata, so call it even if we are just checking the table metadata
     processor = Processor(args.bucket, args.namespace, args.table_name,
                           connect_timeout=args.connect_timeout,
                           request_timeout=args.request_timeout)
@@ -480,10 +484,13 @@ def main():
         starting_quarter = args.quarter - 1
         starting_month = TimestampMonth.from_year_quarter(args.year, starting_quarter)
     else:
+        # Start from month following the last month that we have
+        # TimestampMonth handles all the logic around crossing quarter/year boundaries
         starting_month = TimestampMonth.from_year_month(processor.max_year, processor.max_month) + 1
         starting_year = starting_month.year()
         starting_quarter = starting_month.quarter()
 
+    # Sanity checks
     assert starting_month >= TimestampMonth.from_year_month(FIRST_YEAR_OF_ANNUAL_DATA, 0), 'Starting month out of bounds'
     assert starting_quarter in range(0, 4), 'Starting quarter out of bounds'
     assert starting_year >= FIRST_YEAR_OF_ANNUAL_DATA, 'Starting year out of bounds'
