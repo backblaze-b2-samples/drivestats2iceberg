@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 # Number of times to retry the write_table operation
 WRITE_TABLE_RETRIES = 8
 
+# Substrings identifying S3 errors that retrying will never fix (e.g. permission issues)
+NON_RETRYABLE_S3_ERRORS = ('ACCESS_DENIED',)
+
 # Match the CSV filenames within the zip files
 # Various forms:
 # 2014/2014-06-25.csv
@@ -60,6 +63,10 @@ INITIAL_COLUMN_TYPES = {
 
 # URL scheme used with PyIceberg etc. Can change this to another value if necessary
 FS_SCHEME = "s3"
+
+# Iceberg spec convention: partition field IDs start at 1000 to keep them out of the
+# schema field ID space, which grows independently over time
+FIRST_PARTITION_FIELD_ID = 1000
 
 DEFAULT_NAMESPACE = 'default'
 DEFAULT_TABLE_NAME = 'drivestats'
@@ -122,6 +129,9 @@ def get_region(endpoint: str):
     """
     endpoint_pattern = re.compile(r'^https://s3\.([a-zA-Z0-9-]+)\.backblazeb2\.com$')
     region_match = endpoint_pattern.match(endpoint)
+    if region_match is None:
+        # Give a clear error instead of a bare AttributeError on region_match.group(1)
+        raise ValueError(f'AWS_ENDPOINT_URL is not a recognized Backblaze B2 endpoint: {endpoint}')
     region_name = region_match.group(1)
     return region_name
 
@@ -212,7 +222,7 @@ class Processor:
             partition_spec=PartitionSpec(
                 PartitionField(
                     source_id=partition_field.field_id,
-                    field_id=partition_field.field_id,
+                    field_id=FIRST_PARTITION_FIELD_ID,
                     transform=MonthTransform(),
                     name="date_month"
                 )
@@ -274,6 +284,8 @@ class Processor:
                 month_data = current_data
 
                 self.update_schema(current_data)
+                year = current_year
+                month = current_month
             elif year != current_year or month != current_month:
                 # We hit a new month. Write out the accumulated data.
                 self.write_data(year, month, month_data)
@@ -340,15 +352,19 @@ class Processor:
         """
         logger.info(f'Writing {table.num_rows} rows for {month}/{year} to {".".join(self.table.name())}')
         delay = 1
+        last_error = None
         for i in range(WRITE_TABLE_RETRIES):
             try:
                 self.table.append(table)
                 return
             except OSError as e:
+                if any(pattern in str(e) for pattern in NON_RETRYABLE_S3_ERRORS):
+                    raise
+                last_error = e
                 logger.warning(f'Error writing table. Will try again in {delay} second(s). Error was: {str(e)}')
                 sleep(delay)
                 delay *= 2
-        raise OSError(f'Cannot write table after {WRITE_TABLE_RETRIES} tries')
+        raise OSError(f'Cannot write table after {WRITE_TABLE_RETRIES} tries') from last_error
 
     def massage_data(self, data: pa.Table, year: int, month: int, day: int) -> pa.Table:
         """
@@ -505,7 +521,9 @@ def main():
 
     # Convert the quarterly data files
     year = max(starting_year, FIRST_YEAR_OF_QUARTERLY_DATA)
-    quarter = starting_quarter
+    # starting_quarter was computed relative to starting_year; if that year predates
+    # quarterly data, don't carry it over to the (different) first quarterly year.
+    quarter = starting_quarter if starting_year >= FIRST_YEAR_OF_QUARTERLY_DATA else 0
 
     while True:
         while quarter < 4:
